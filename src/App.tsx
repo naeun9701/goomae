@@ -8,11 +8,22 @@ import { FilterBar } from './components/FilterBar';
 import { QuoteTable } from './components/QuoteTable';
 import { PRDetailModal } from './components/PRDetailModal';
 import { QuoteFormModal } from './components/QuoteFormModal';
-import { Building2, Sparkles, RefreshCcw, Download } from 'lucide-react';
+import { LoginModal } from './components/LoginModal';
+import { fetchQuotesFromSupabase, saveQuotesToSupabase } from './lib/supabaseService';
+import { Building2, Sparkles, RefreshCcw, LogOut, User, Database } from 'lucide-react';
 
 const STORAGE_KEY = 'exs02.quotes.v1';
+const USER_KEY = 'exs02.user.v1';
 
 export default function App() {
+  const [currentUser, setCurrentUser] = useState<string | null>(() => {
+    try {
+      return localStorage.getItem(USER_KEY);
+    } catch {
+      return null;
+    }
+  });
+
   const [quotes, setQuotes] = useState<QuoteRecord[]>(() => {
     try {
       const saved = localStorage.getItem(STORAGE_KEY);
@@ -28,6 +39,17 @@ export default function App() {
     return SAMPLE_QUOTES; // Default to sample data
   });
 
+  // Fetch from Supabase on mount if configured
+  useEffect(() => {
+    if (currentUser) {
+      fetchQuotesFromSupabase().then(dbQuotes => {
+        if (dbQuotes && dbQuotes.length > 0) {
+          setQuotes(dbQuotes);
+        }
+      });
+    }
+  }, [currentUser]);
+
   const [filter, setFilter] = useState<FilterState>({
     searchQuery: '',
     statusFilter: '전체',
@@ -42,14 +64,27 @@ export default function App() {
   const [isFormModalOpen, setIsFormModalOpen] = useState(false);
   const [editingQuote, setEditingQuote] = useState<EvaluatedQuoteRecord | null>(null);
 
-  // Save to localStorage
+  // Save to localStorage and Supabase
   useEffect(() => {
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(quotes));
+      if (currentUser) {
+        saveQuotesToSupabase(quotes, currentUser);
+      }
     } catch (e) {
-      console.error('Failed to save to localStorage', e);
+      console.error('Failed to save quotes', e);
     }
-  }, [quotes]);
+  }, [quotes, currentUser]);
+
+  const handleLoginSuccess = (email: string) => {
+    setCurrentUser(email);
+    localStorage.setItem(USER_KEY, email);
+  };
+
+  const handleLogout = () => {
+    setCurrentUser(null);
+    localStorage.removeItem(USER_KEY);
+  };
 
   // Evaluated quotes
   const evaluatedQuotes = useMemo(() => {
@@ -82,7 +117,7 @@ export default function App() {
       }
 
       // Anomaly filter
-      if (filter.anomalyFilter === '이상チ' || filter.anomalyFilter === '이상치') {
+      if (filter.anomalyFilter === '이상치') {
         if (q.priceState !== '이상치') return false;
       } else if (filter.anomalyFilter === '표기상이') {
         if (!q.isNameMismatch) return false;
@@ -94,7 +129,6 @@ export default function App() {
 
       return true;
     }).sort((a, b) => {
-      // Delivery rank order: 지연(0) -> 임박(1) -> 정상(2) -> 납기미기재(3) -> 판정대상아님(4)
       const rankMap: Record<string, number> = {
         '지연': 0,
         '임박': 1,
@@ -107,15 +141,12 @@ export default function App() {
 
       if (rankA !== rankB) return rankA - rankB;
 
-      // Secondary: D-day ascending (nulls last)
       const dA = a.dDay !== null ? a.dDay : 9999;
       const dB = b.dDay !== null ? b.dDay : 9999;
       if (dA !== dB) return dA - dB;
 
-      // Tertiary: pr_no
       if (a.pr_no !== b.pr_no) return a.pr_no.localeCompare(b.pr_no);
 
-      // Quaternary: unit_price ascending
       const pA = a.unit_price ?? 999999999;
       const pB = b.unit_price ?? 999999999;
       return pA - pB;
@@ -124,7 +155,13 @@ export default function App() {
 
   // Handlers
   const handleLoadQuotes = (newQuotes: QuoteRecord[]) => {
-    setQuotes(newQuotes);
+    // Accumulate or merge with existing quotes by quote_id
+    setQuotes(prev => {
+      const map = new Map<string, QuoteRecord>();
+      prev.forEach(q => map.set(q.quote_id, q));
+      newQuotes.forEach(q => map.set(q.quote_id, q)); // overwrite or accumulate
+      return Array.from(map.values());
+    });
   };
 
   const handleResetToSample = () => {
@@ -203,6 +240,11 @@ export default function App() {
     document.body.removeChild(link);
   };
 
+  // If not logged in, show LoginModal
+  if (!currentUser) {
+    return <LoginModal onLoginSuccess={handleLoginSuccess} onBypassDemo={() => handleLoginSuccess('demo.purchaser@company.com')} />;
+  }
+
   return (
     <div className="min-h-screen bg-slate-900 text-slate-100 flex flex-col font-sans antialiased">
       {/* Top Header */}
@@ -219,18 +261,30 @@ export default function App() {
           </div>
         </div>
 
-        <div className="flex items-center gap-2.5">
+        <div className="flex items-center gap-3">
+          <div className="hidden sm:flex items-center gap-2 px-3 py-1.5 bg-slate-800/90 border border-slate-700 rounded-xl text-xs text-slate-300">
+            <User className="w-3.5 h-3.5 text-indigo-400" />
+            <span className="font-medium max-w-[160px] truncate">{currentUser}</span>
+          </div>
+
           <button
             onClick={handleResetToSample}
             className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-slate-200 rounded-xl text-xs font-medium flex items-center gap-1.5 transition-all cursor-pointer border border-slate-600"
           >
-            <Sparkles className="w-3.5 h-3.5 text-indigo-400" /> 샘플 데이터 복원
+            <Sparkles className="w-3.5 h-3.5 text-indigo-400" /> 샘플 복원
           </button>
           <button
             onClick={handleClearAll}
             className="px-3 py-1.5 bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 rounded-xl text-xs font-medium flex items-center gap-1.5 transition-all cursor-pointer border border-rose-500/30"
           >
-            <RefreshCcw className="w-3.5 h-3.5" /> 전체 초기화
+            <RefreshCcw className="w-3.5 h-3.5" /> 초기화
+          </button>
+          <button
+            onClick={handleLogout}
+            title="로그아웃"
+            className="p-2 bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-slate-200 rounded-xl transition-all cursor-pointer border border-slate-700"
+          >
+            <LogOut className="w-4 h-4" />
           </button>
         </div>
       </header>
